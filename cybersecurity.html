@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Password Vault</title>
+<style>
+:root{--bg:#f4f5f7;--card:#fff;--tx:#1b1f24;--mut:#6a727c;--bd:#dde1e6;--ac:#2563eb;--bad:#b42318}
+@media (prefers-color-scheme:dark){:root{color-scheme:dark;--bg:#111418;--card:#1a1e24;--tx:#e8eaed;--mut:#9aa3ad;--bd:#2c323a;--ac:#6ea0ff;--bad:#f87171}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:520px;margin:0 auto;padding:20px}
+h1{font-size:20px;margin:0 0 14px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:14px;margin-bottom:12px}
+input{width:100%;padding:10px;margin-bottom:8px;border:1px solid var(--bd);border-radius:8px;background:var(--bg);color:var(--tx);font:inherit}
+button{border:0;border-radius:8px;padding:9px 14px;background:var(--ac);color:#fff;font:inherit;cursor:pointer}
+button.s{background:var(--bg);color:var(--tx);border:1px solid var(--bd);padding:5px 10px;font-size:13px}
+.hide{display:none}
+#msg{color:var(--bad);font-size:13px;min-height:18px}
+.item{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 0;border-top:1px solid var(--bd)}
+.item:first-child{border-top:0}
+.item small{color:var(--mut);display:block}
+.top{display:flex;justify-content:space-between;align-items:center}
+details{font-size:12px;color:var(--mut)}
+pre{white-space:pre-wrap;word-break:break-all;font-size:11px;margin:6px 0 0}
+</style>
+</head>
+<body>
+<main>
+<h1>🔑 Password Vault</h1>
+
+<div class="card" id="lock">
+  <input type="password" id="master" placeholder="Master password" autofocus autocomplete="off">
+  <label style="font-size:13px;color:var(--mut)"><input type="checkbox" style="width:auto" onchange="$('#master').type=this.checked?'text':'password'"> Show password</label><br><br>
+  <button id="go">Unlock</button>
+  <div id="msg"></div>
+  <small style="color:var(--mut)">First time? Whatever you enter becomes your master password. If you forget it, the data cannot be recovered.</small>
+</div>
+
+<div id="vault" class="hide">
+  <div class="card">
+    <input id="site" placeholder="Site (e.g. gmail.com)">
+    <input id="user" placeholder="Username / email">
+    <input id="pass" type="password" placeholder="Password">
+    <button id="add">Add</button>
+  </div>
+  <div class="card">
+    <div class="top"><b>Saved</b><button class="s" id="lockbtn">Lock</button></div>
+    <div id="list"></div>
+  </div>
+  <details class="card"><summary>What is stored on disk (what an attacker sees)</summary><pre id="raw"></pre></details>
+</div>
+</main>
+
+<script>
+const $=s=>document.querySelector(s),E=new TextEncoder(),D=new TextDecoder(),KEY='vault';
+const b64=u=>btoa(String.fromCharCode(...new Uint8Array(u)));
+const ub=s=>Uint8Array.from(atob(s),c=>c.charCodeAt(0));
+let key,salt,items=[];
+let store;try{localStorage.setItem('t','1');store=localStorage}catch{store={}} // falls back to memory if browser blocks storage
+
+// master password -> AES-256 key (PBKDF2, 200k rounds)
+async function derive(pw,salt){
+  const m=await crypto.subtle.importKey('raw',E.encode(pw),'PBKDF2',false,['deriveKey']);
+  return crypto.subtle.deriveKey({name:'PBKDF2',salt,iterations:200000,hash:'SHA-256'},m,{name:'AES-GCM',length:256},false,['encrypt','decrypt']);
+}
+// encrypt everything and store only ciphertext
+async function save(){
+  const iv=crypto.getRandomValues(new Uint8Array(12));
+  const ct=await crypto.subtle.encrypt({name:'AES-GCM',iv},key,E.encode(JSON.stringify(items)));
+  store[KEY]=JSON.stringify({salt:b64(salt),iv:b64(iv),data:b64(ct)});
+  $('#raw').textContent=store[KEY];
+}
+async function unlock(){
+  const pw=$('#master').value;if(!pw)return;
+  $('#msg').textContent='';
+  const stored=store[KEY];
+  if(stored){
+    const v=JSON.parse(stored);salt=ub(v.salt);key=await derive(pw,salt);
+    try{items=JSON.parse(D.decode(await crypto.subtle.decrypt({name:'AES-GCM',iv:ub(v.iv)},key,ub(v.data))))}
+    catch{return $('#msg').textContent='Wrong master password'}
+  }else{
+    salt=crypto.getRandomValues(new Uint8Array(16));key=await derive(pw,salt);items=[];await save();
+  }
+  $('#master').value='';$('#lock').classList.add('hide');$('#vault').classList.remove('hide');
+  $('#raw').textContent=store[KEY];render();
+}
+function render(){
+  const list=$('#list');list.replaceChildren();
+  if(!items.length)list.textContent='Nothing saved yet.';
+  items.forEach((it,i)=>{
+    const row=document.createElement('div');row.className='item';
+    const info=document.createElement('div');
+    const a=document.createElement('b');a.textContent=it.site;
+    const s=document.createElement('small');s.textContent=it.user;
+    info.append(a,s);
+    const btns=document.createElement('div');
+    const mk=(t,f)=>{const b=document.createElement('button');b.className='s';b.textContent=t;b.onclick=f;b.style.marginLeft='4px';return b};
+    const show=mk('Show',()=>{s.textContent=s.textContent===it.user?it.user+' · '+it.pass:it.user});
+    const copy=mk('Copy',()=>navigator.clipboard.writeText(it.pass));
+    const del=mk('Delete',async()=>{items.splice(i,1);await save();render()});
+    btns.append(show,copy,del);row.append(info,btns);list.appendChild(row);
+  });
+}
+$('#add').onclick=async()=>{
+  const site=$('#site').value.trim(),user=$('#user').value.trim(),pass=$('#pass').value;
+  if(!site||!pass)return;
+  items.push({site,user,pass});await save();render();
+  ['#site','#user','#pass'].forEach(s=>$(s).value='');
+};
+$('#go').onclick=unlock;
+$('#master').addEventListener('keydown',e=>{if(e.key==='Enter')unlock()});
+$('#lockbtn').onclick=()=>{key=null;items=[];$('#vault').classList.add('hide');$('#lock').classList.remove('hide')};
+</script>
+</body>
+</html>
